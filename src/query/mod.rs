@@ -6,7 +6,7 @@ pub mod prelude {
     pub use super::parse::{QueryParseError, QueryToken, strip_first_and_last};
     pub use super::search_term::{SearchTerm, to_search_term};
     pub use super::sort_order::{SortDirection, SortKey, SortOrder, SortOrderParseError};
-    pub use super::{ArticleQuery, AugmentedArticleFilter};
+    pub use super::{ArticleQuery, ArticleQueryContext, AugmentedArticleFilter};
 }
 
 use crate::prelude::*;
@@ -33,6 +33,7 @@ pub(super) enum QueryAtom {
     All(SearchTerm),
     Tag(Vec<String>),
     Tagged,
+    Flagged,
     LastSync,
     Newer(DateTime<Utc>),
     Older(DateTime<Utc>),
@@ -55,13 +56,14 @@ impl QueryClause {
         category: Option<&Category>,
         tags: Option<&HashSet<String>>,
         last_sync: &DateTime<Utc>,
+        flagged_articles: &HashSet<ArticleID>,
     ) -> bool {
         match self {
             QueryClause::Id(query_atom) => {
-                query_atom.test(article, feed, category, tags, last_sync)
+                query_atom.test(article, feed, category, tags, last_sync, flagged_articles)
             }
             QueryClause::Not(query_atom) => {
-                !query_atom.test(article, feed, category, tags, last_sync)
+                !query_atom.test(article, feed, category, tags, last_sync, flagged_articles)
             }
         }
     }
@@ -75,56 +77,52 @@ pub struct ArticleQuery {
     sort_order: Option<SortOrder>,
 }
 
+pub struct ArticleQueryContext<'a> {
+    pub feed_map: &'a HashMap<FeedID, Feed>,
+    pub category_for_feed: &'a HashMap<FeedID, Category>,
+    pub tags_for_article: &'a HashMap<ArticleID, Vec<TagID>>,
+    pub tag_map: &'a HashMap<TagID, Tag>,
+    pub last_sync: &'a DateTime<Utc>,
+    pub flagged: &'a HashSet<ArticleID>,
+}
+
 impl ArticleQuery {
     #[inline(always)]
-    pub fn filter(
-        &self,
-        articles: &[Article],
-        feed_map: &HashMap<FeedID, Feed>,
-        category_for_feed: &HashMap<FeedID, Category>,
-        tags_for_article: &HashMap<ArticleID, Vec<TagID>>,
-        tag_map: &HashMap<TagID, Tag>,
-        last_sync: &DateTime<Utc>,
-    ) -> Vec<Article> {
+    pub fn filter(&self, articles: &[Article], context: &ArticleQueryContext) -> Vec<Article> {
         articles
             .iter()
-            .filter(|article| {
-                self.test(
-                    article,
-                    feed_map,
-                    category_for_feed,
-                    tags_for_article,
-                    tag_map,
-                    last_sync,
-                )
-            })
+            .filter(|article| self.test(article, context))
             .cloned()
             .collect::<Vec<Article>>()
     }
 
     #[inline(always)]
-    pub fn test(
-        &self,
-        article: &Article,
-        feed_map: &HashMap<FeedID, Feed>,
-        category_for_feed: &HashMap<FeedID, Category>,
-        tags_for_article: &HashMap<ArticleID, Vec<TagID>>,
-        tag_map: &HashMap<TagID, Tag>,
-        last_sync: &DateTime<Utc>,
-    ) -> bool {
-        let feed = feed_map.get(&article.feed_id);
+    pub fn test(&self, article: &Article, context: &ArticleQueryContext) -> bool {
+        let feed = context.feed_map.get(&article.feed_id);
 
-        let category = category_for_feed.get(&article.feed_id);
+        let category = context.category_for_feed.get(&article.feed_id);
 
-        let tags = tags_for_article.get(&article.article_id).map(|tag_ids| {
-            tag_ids
-                .iter()
-                .filter_map(|tag_id| tag_map.get(tag_id).map(|tag| tag.label.to_string()))
-                .collect::<HashSet<String>>()
-        });
+        let tags = context
+            .tags_for_article
+            .get(&article.article_id)
+            .map(|tag_ids| {
+                tag_ids
+                    .iter()
+                    .filter_map(|tag_id| {
+                        context.tag_map.get(tag_id).map(|tag| tag.label.to_string())
+                    })
+                    .collect::<HashSet<String>>()
+            });
 
         self.query.iter().all(|query_clause| {
-            query_clause.test(article, feed, category, tags.as_ref(), last_sync)
+            query_clause.test(
+                article,
+                feed,
+                category,
+                tags.as_ref(),
+                context.last_sync,
+                context.flagged,
+            )
         })
     }
 }
@@ -138,36 +136,39 @@ impl QueryAtom {
         category: Option<&Category>,
         tags: Option<&HashSet<String>>,
         last_sync: &DateTime<Utc>,
+        flagged_articles: &HashSet<ArticleID>,
     ) -> bool {
-        use QueryAtom::*;
+        use QueryAtom as A;
         match self {
-            True => true,
-            Read(read) => article.unread == *read,
-            Marked(marked) => article.marked == *marked,
+            A::True => true,
+            A::Read(read) => article.unread == *read,
+            A::Marked(marked) => article.marked == *marked,
 
-            Tagged => !tags.map(|tags| tags.is_empty()).unwrap_or(true),
+            A::Tagged => !tags.map(|tags| tags.is_empty()).unwrap_or(true),
 
-            Feed(search_term)
-            | Category(search_term)
-            | Title(search_term)
-            | Summary(search_term)
-            | Author(search_term)
-            | FeedUrl(search_term)
-            | FeedWebUrl(search_term)
-            | All(search_term) => self.test_string_match(search_term, article, feed, category),
+            A::Flagged => flagged_articles.contains(&article.article_id),
 
-            Tag(search_tags) => {
+            A::Feed(search_term)
+            | A::Category(search_term)
+            | A::Title(search_term)
+            | A::Summary(search_term)
+            | A::Author(search_term)
+            | A::FeedUrl(search_term)
+            | A::FeedWebUrl(search_term)
+            | A::All(search_term) => self.test_string_match(search_term, article, feed, category),
+
+            A::Tag(search_tags) => {
                 let Some(tags) = tags else {
                     return false;
                 };
                 search_tags.iter().any(|tag| tags.contains(tag))
             }
 
-            Older(date_time) => article.date < *date_time,
-            Newer(date_time) => article.date > *date_time,
-            SyncedAfter(date_time) => article.synced > *date_time,
-            SyncedBefore(date_time) => article.synced < *date_time,
-            LastSync => article.synced >= *last_sync,
+            A::Older(date_time) => article.date < *date_time,
+            A::Newer(date_time) => article.date > *date_time,
+            A::SyncedAfter(date_time) => article.synced > *date_time,
+            A::SyncedBefore(date_time) => article.synced < *date_time,
+            A::LastSync => article.synced >= *last_sync,
         }
     }
 

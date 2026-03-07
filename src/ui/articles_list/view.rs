@@ -42,21 +42,6 @@ pub struct FilterState {
     sticky_adhoc_filter: bool,
 }
 
-// impl Default for FilterState {
-//     fn default() -> Self {
-//         Self {
-//             default_sort_order: SortOrder::default(),
-//             article_scope: ArticleScope::All,
-//             augmented_article_filter: None,
-//             article_search_query: None,
-//             article_adhoc_filter: None,
-//             apply_article_adhoc_filter: false,
-//             adhoc_sort_order: None,
-//             reverse_sort_order: false,
-//         }
-//     }
-// }
-
 impl FilterState {
     pub fn new(article_scope: ArticleScope, default_sort_order: SortOrder) -> Self {
         Self {
@@ -253,7 +238,7 @@ impl<'a> ArticleListViewData<'a> {
         filter_state: &FilterState,
         _is_focused: bool,
     ) {
-        let selected_style = config.theme.selected();
+        let selected_style = config.theme.selected(&Default::default());
 
         let read_icon = config.read_icon.to_string();
         let unread_icon = config.unread_icon.to_string();
@@ -347,15 +332,15 @@ impl<'a> ArticleListViewData<'a> {
                         }
                         .into(),
                         "{read}" => if article.unread == Read::Read {
-                            format!(" {} ", read_icon)
+                            format!(" {}", read_icon)
                         } else {
-                            format!(" {} ", unread_icon)
+                            format!(" {}", unread_icon)
                         }
                         .into(),
                         "{marked}" => if article.marked == Marked::Marked {
-                            format!(" {} ", marked_icon)
+                            format!(" {}", marked_icon)
                         } else {
-                            format!(" {} ", unmarked_icon)
+                            format!(" {}", unmarked_icon)
                         }
                         .into(),
                         "{url}" => article
@@ -364,6 +349,14 @@ impl<'a> ArticleListViewData<'a> {
                             .map(|url| url.to_string())
                             .unwrap_or("?".into())
                             .into(),
+                        "{flagged}" => if model_data.flagged_articles().is_empty() {
+                            "".to_string()
+                        } else if model_data.flagged_articles().contains(&article.article_id) {
+                            format!(" {}", config.flagged_icon)
+                        } else {
+                            "  ".to_string()
+                        }
+                        .into(),
                         _ => format!("{placeholder}?").into(),
                     })
                     .collect();
@@ -372,31 +365,43 @@ impl<'a> ArticleListViewData<'a> {
                     Some(query)
                         if query.test(
                             article,
-                            model_data.feed_map(),
-                            model_data.category_for_feed(),
-                            model_data.tags_for_article(),
-                            model_data.tag_map(),
-                            model_data.last_sync(),
+                            &ArticleQueryContext {
+                                feed_map: model_data.feed_map(),
+                                category_for_feed: model_data.category_for_feed(),
+                                tags_for_article: model_data.tags_for_article(),
+                                tag_map: model_data.tag_map(),
+                                last_sync: model_data.last_sync(),
+                                flagged: model_data.flagged_articles(),
+                            },
                         ) =>
                     {
-                        config.theme.patch_highlighted(&config.theme.article())
+                        config.theme.highlighted(&config.theme.article())
                     }
                     _ => config.theme.article(),
                 };
 
                 style = if article.unread == Read::Read {
-                    config.theme.patch_read(&style)
+                    config.theme.read(&style)
                 } else {
-                    config.theme.patch_unread(&style)
+                    config.theme.unread(&style)
                 };
+
+                if model_data.flagged_articles().contains(&article.article_id) {
+                    style = config.theme.flagged(&style);
+                }
 
                 Row::new(row_vec).style(style)
             })
             .collect();
 
         let constraint_for_placeholder = |placeholder: &str| {
-            if placeholder == "{read}" || placeholder == "{marked}" {
-                Constraint::Length(3)
+            if placeholder == "{read}"
+                || placeholder == "{marked}"
+                || (placeholder == "{flagged}" && !model_data.flagged_articles().is_empty())
+            {
+                Constraint::Length(2)
+            } else if placeholder == "{flagged}" {
+                Constraint::Length(0)
             } else if placeholder == "{age}" {
                 Constraint::Length(4)
             } else if placeholder == "{date}" {
