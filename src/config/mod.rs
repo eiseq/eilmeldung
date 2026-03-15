@@ -123,6 +123,8 @@ pub struct Config {
 
     pub after_sync_commands: Vec<Command>,
 
+    pub mouse_support: bool,
+
     pub show_top_bar: bool,
     pub offline_icon: char,
     pub all_label: String,
@@ -335,6 +337,7 @@ impl Default for Config {
             ],
             login_setup: None,
             cli: CliConfig::default(),
+            mouse_support: false,
         }
     }
 }

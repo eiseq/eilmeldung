@@ -5,6 +5,7 @@ mod command_confirm;
 mod command_input;
 mod feeds_list;
 mod help_popup;
+mod mouse;
 mod tooltip;
 mod view;
 
@@ -16,6 +17,7 @@ pub mod prelude {
     pub use super::command_input::CommandInput;
     pub use super::feeds_list::prelude::*;
     pub use super::help_popup::HelpPopup;
+    pub use super::mouse::PanelAreas;
     pub use super::tooltip::{Tooltip, TooltipFlavor, tooltip};
     pub use super::{App, AppState};
 }
@@ -26,6 +28,7 @@ use chrono::TimeDelta;
 use log::{debug, error, info, trace, warn};
 use news_flash::error::{FeedApiError, NewsFlashError};
 use ratatui::DefaultTerminal;
+use ratatui::crossterm::event::{MouseButton, MouseEventKind};
 use std::{fmt::Display, path::Path, str::FromStr, sync::Arc, time::Duration};
 use throbber_widgets_tui::ThrobberState;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -144,6 +147,14 @@ pub struct App {
     is_offline: bool,
 
     is_running: bool,
+
+    panel_areas: PanelAreas,
+
+    /// When true, the user is dragging the horizontal border; stores the initial row of the drag.
+    drag_resize_active: bool,
+
+    /// Override for the articles/content split height (absolute row count for articles list).
+    articles_height_override: Option<u16>,
 }
 
 impl App {
@@ -199,6 +210,9 @@ impl App {
             ),
             async_operation_throbber: ThrobberState::default(),
             is_offline: false,
+            panel_areas: PanelAreas::default(),
+            drag_resize_active: false,
+            articles_height_override: None,
         };
 
         info!("App instance created with initial state: FeedSelection");
@@ -386,6 +400,108 @@ impl App {
     fn logout(&self) {
         self.news_flash_utils.logout();
     }
+
+    fn handle_mouse_event(
+        &mut self,
+        mouse_event: ratatui::crossterm::event::MouseEvent,
+    ) -> color_eyre::Result<()> {
+        // Skip mouse events when a modal/dialog is active
+        if self.command_input.is_active()
+            || self.command_confirm.is_active()
+            || self.help_popup.is_modal().unwrap_or(false)
+        {
+            return Ok(());
+        }
+
+        let col = mouse_event.column;
+        let row = mouse_event.row;
+
+        match mouse_event.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                // Check if clicking on the horizontal border to start a drag-resize
+                if self.panel_areas.is_on_horizontal_border(col, row) {
+                    self.drag_resize_active = true;
+                    return Ok(());
+                }
+
+                if let Some(panel) = self.panel_areas.panel_at(col, row) {
+                    // Focus the clicked panel
+                    let target_state: AppState = panel.into();
+                    if self.state != target_state {
+                        self.switch_state(target_state)?;
+                    }
+
+                    match panel {
+                        Panel::ArticleList => {
+                            if let Some(row_offset) = self.panel_areas.article_row_offset(row) {
+                                self.message_sender
+                                    .send(Message::Event(Event::MouseArticleClick(row_offset)))?;
+                            }
+                        }
+                        Panel::FeedList => {
+                            self.message_sender
+                                .send(Message::Event(Event::MouseFeedClick(col, row)))?;
+                        }
+                        _ => {}
+                    }
+
+                    self.message_sender
+                        .send(Message::Command(Command::Redraw))?;
+                }
+            }
+
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if self.drag_resize_active {
+                    // Calculate the new articles list height based on drag position
+                    let articles_top = self.panel_areas.articles_list().y;
+                    let content_bottom = self.panel_areas.article_content().y
+                        + self.panel_areas.article_content().height;
+                    let total_height = content_bottom.saturating_sub(articles_top);
+                    // Clamp: minimum 3 rows for each panel
+                    let new_articles_height = row
+                        .saturating_sub(articles_top)
+                        .clamp(3, total_height.saturating_sub(3));
+
+                    let old_articles_height =
+                        self.articles_height_override.replace(new_articles_height);
+
+                    // only redraw if height has changed
+                    if let Some(old_articles_height) = old_articles_height
+                        && old_articles_height != new_articles_height
+                    {
+                        self.message_sender
+                            .send(Message::Command(Command::Redraw))?;
+                    }
+                }
+            }
+
+            MouseEventKind::Up(MouseButton::Left) => {
+                self.drag_resize_active = false;
+            }
+
+            MouseEventKind::ScrollDown => {
+                if let Some(panel) = self.panel_areas.panel_at(col, row) {
+                    self.message_sender
+                        .send(Message::Event(Event::MouseScrollDown(panel)))?;
+                    self.message_sender
+                        .send(Message::Command(Command::Redraw))?;
+                }
+            }
+
+            MouseEventKind::ScrollUp => {
+                if let Some(panel) = self.panel_areas.panel_at(col, row) {
+                    self.message_sender
+                        .send(Message::Event(Event::MouseScrollUp(panel)))?;
+                    self.message_sender
+                        .send(Message::Command(Command::Redraw))?;
+                }
+            }
+
+            _ => {}
+        }
+
+        Ok(())
+    }
 }
 
 impl MessageReceiver for App {
@@ -434,6 +550,12 @@ impl MessageReceiver for App {
                 trace!("terminal resized, forcing redraw");
                 self.message_sender
                     .send(Message::Command(Command::Redraw))?;
+            }
+
+            Message::Event(Event::Mouse(mouse_event)) => {
+                self.handle_mouse_event(*mouse_event)?;
+                // handle_mouse_event sends its own Redraw when needed (e.g. during drag)
+                needs_redraw = false;
             }
 
             Message::Event(Tick) => {

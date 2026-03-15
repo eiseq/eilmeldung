@@ -44,20 +44,26 @@ impl Widget for &mut App {
             ])
             .areas(area);
 
-        let (articles_constraint_height, article_content_constraint_height) = match self.state {
-            AppState::FeedSelection | AppState::ArticleSelection => (
-                self.config.article_list_focused_height.as_constraint(),
-                self.config
-                    .article_list_focused_height
-                    .as_complementary_constraint(middle.height),
-            ),
-            _ => (
-                self.config
-                    .article_content_focused_height
-                    .as_complementary_constraint(middle.height),
-                self.config.article_content_focused_height.as_constraint(),
-            ),
-        };
+        let (articles_constraint_height, article_content_constraint_height) =
+            if let Some(override_height) = self.articles_height_override {
+                // User is dragging the border — use absolute heights
+                (Constraint::Length(override_height), Constraint::Min(0))
+            } else {
+                match self.state {
+                    AppState::FeedSelection | AppState::ArticleSelection => (
+                        self.config.article_list_focused_height.as_constraint(),
+                        self.config
+                            .article_list_focused_height
+                            .as_complementary_constraint(middle.height),
+                    ),
+                    _ => (
+                        self.config
+                            .article_content_focused_height
+                            .as_complementary_constraint(middle.height),
+                        self.config.article_content_focused_height.as_constraint(),
+                    ),
+                }
+            };
 
         let [feeds_list_chunk, articles_chunk] = Layout::default()
             .direction(Direction::Horizontal)
@@ -71,6 +77,11 @@ impl Widget for &mut App {
                 article_content_constraint_height,
             ])
             .areas(articles_chunk);
+
+        // store areas for mouse hit-testing
+        *self.panel_areas.feed_list_mut() = feeds_list_chunk;
+        *self.panel_areas.articles_list_mut() = articles_list_chunk;
+        *self.panel_areas.article_content_mut() = article_content_chunk;
 
         // render stuff
         self.feed_list.render(feeds_list_chunk, buf);
