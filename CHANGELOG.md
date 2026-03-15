@@ -1,5 +1,7 @@
 # Unreleased
 
+# 1.2.0 - 2026-03-15
+
 - **Important**: due to the update of the news-flash library you may need to logout and login again:
   - run `eilmeldung --logout`
   - or in *eilmeldung* run the command `LOGOUT NOW` (press `:` to open the command line)
